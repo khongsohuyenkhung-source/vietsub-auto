@@ -1,78 +1,109 @@
 import os
 import subprocess
 import tempfile
-from flask import Flask, request, render_template_string, send_file
+from io import BytesIO
 
+from flask import Flask, request, render_template_string, send_file
 from openai import OpenAI
+
 
 app = Flask(__name__)
 
-# Giới hạn video upload
-app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024  # 300 MB
+# Giới hạn video upload: 500 MB
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 
-client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY")
-)
+# Lấy API key từ Render Environment Variables
+api_key = os.environ.get("OPENAI_API_KEY")
+
+if not api_key:
+    print("WARNING: Chưa có OPENAI_API_KEY")
+
+client = OpenAI(api_key=api_key)
+
 
 HTML = """
 <!DOCTYPE html>
 <html lang="vi">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
     <title>Vietsub Auto</title>
 
     <style>
+
+        * {
+            box-sizing: border-box;
+        }
+
         body {
             margin: 0;
             font-family: Arial, sans-serif;
-            background: #111827;
+            background:
+                linear-gradient(
+                    135deg,
+                    #111827,
+                    #1e3a8a
+                );
             color: white;
+            min-height: 100vh;
         }
 
         .container {
+            width: 90%;
             max-width: 800px;
             margin: 60px auto;
-            padding: 20px;
         }
 
         .box {
-            background: #1f2937;
-            padding: 30px;
-            border-radius: 18px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            background: rgba(17, 24, 39, 0.95);
+            padding: 35px;
+            border-radius: 20px;
+            box-shadow:
+                0 20px 60px rgba(0, 0, 0, 0.4);
         }
 
         h1 {
             text-align: center;
+            font-size: 32px;
             margin-bottom: 10px;
         }
 
-        .desc {
+        .description {
             text-align: center;
             color: #9ca3af;
             margin-bottom: 30px;
         }
 
-        input[type=file] {
+        .upload-area {
+            border: 2px dashed #4b5563;
+            border-radius: 15px;
+            padding: 30px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        input[type="file"] {
             width: 100%;
             padding: 15px;
-            box-sizing: border-box;
             background: #374151;
             color: white;
             border-radius: 10px;
             border: 1px solid #4b5563;
-            margin-bottom: 20px;
         }
 
         button {
             width: 100%;
-            padding: 15px;
+            padding: 16px;
             border: none;
             border-radius: 10px;
             background: #2563eb;
             color: white;
-            font-size: 17px;
+            font-size: 18px;
+            font-weight: bold;
             cursor: pointer;
         }
 
@@ -92,11 +123,22 @@ HTML = """
             color: #fca5a5;
         }
 
-        .success {
-            color: #86efac;
+        .info {
+            color: #93c5fd;
         }
+
+        .note {
+            margin-top: 20px;
+            color: #9ca3af;
+            font-size: 13px;
+            text-align: center;
+            line-height: 1.6;
+        }
+
     </style>
+
 </head>
+
 
 <body>
 
@@ -106,79 +148,177 @@ HTML = """
 
         <h1>🇨🇳 → 🇻🇳 Vietsub Auto</h1>
 
-        <div class="desc">
-            Upload video tiếng Trung và hệ thống tự tạo phụ đề tiếng Việt.
+        <div class="description">
+            Tự nhận diện tiếng Trung và tạo phụ đề tiếng Việt.
         </div>
 
-        <form action="/vietsub" method="POST" enctype="multipart/form-data">
 
-            <input
-                type="file"
-                name="video"
-                accept="video/*"
-                required
-            >
+        <form
+            action="/vietsub"
+            method="POST"
+            enctype="multipart/form-data"
+        >
+
+            <div class="upload-area">
+
+                <input
+                    type="file"
+                    name="video"
+                    accept="video/*"
+                    required
+                >
+
+            </div>
+
 
             <button type="submit">
-                🚀 Bắt đầu Vietsub
+                🚀 BẮT ĐẦU VIETSUB
             </button>
 
         </form>
 
+
         {% if message %}
-            <div class="message {{ message_type }}">
-                {{ message }}
-            </div>
+
+        <div class="message {{ message_type }}">
+            {{ message }}
+        </div>
+
         {% endif %}
+
+
+        <div class="note">
+            Video → Nhận diện tiếng Trung → Dịch tiếng Việt → SRT
+        </div>
 
     </div>
 
 </div>
 
 </body>
+
 </html>
 """
 
 
-def convert_to_audio(video_path, audio_path):
+def run_command(command):
     """
-    Chuyển video thành audio WAV:
-    mono / 16kHz để nhận diện giọng nói tốt hơn.
+    Chạy lệnh hệ thống.
+    """
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise Exception(result.stderr)
+
+    return result
+
+
+def convert_video_to_audio(video_path, audio_path):
+    """
+    Chuyển video thành WAV:
+    - mono
+    - 16kHz
     """
 
     command = [
         "ffmpeg",
         "-y",
+
         "-i",
         video_path,
+
         "-vn",
+
         "-ac",
         "1",
+
         "-ar",
         "16000",
+
         "-c:a",
         "pcm_s16le",
+
         audio_path
     ]
 
-    subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True
+    run_command(command)
+
+
+def split_audio(audio_path, output_folder):
+    """
+    Chia audio thành các đoạn 10 phút.
+
+    Mục đích:
+    tránh file audio quá lớn khi gửi lên API.
+    """
+
+    pattern = os.path.join(
+        output_folder,
+        "part_%03d.wav"
     )
 
+    command = [
+        "ffmpeg",
+        "-y",
 
-def transcribe_audio(audio_path):
+        "-i",
+        audio_path,
+
+        "-f",
+        "segment",
+
+        "-segment_time",
+        "600",
+
+        "-reset_timestamps",
+        "1",
+
+        "-c",
+        "copy",
+
+        pattern
+    ]
+
+    run_command(command)
+
+    files = []
+
+    for filename in sorted(
+        os.listdir(output_folder)
+    ):
+
+        if filename.startswith("part_") \
+                and filename.endswith(".wav"):
+
+            files.append(
+                os.path.join(
+                    output_folder,
+                    filename
+                )
+            )
+
+    return files
+
+
+def transcribe_part(audio_file):
     """
-    Nhận diện tiếng Trung và lấy timestamp theo từng đoạn.
+    Nhận diện tiếng Trung.
+
+    whisper-1 trả về segment có timestamp.
     """
 
-    with open(audio_path, "rb") as audio_file:
+    with open(audio_file, "rb") as f:
 
         result = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
-            file=audio_file,
+            model="whisper-1",
+            file=f,
+            language="zh",
             response_format="verbose_json",
             timestamp_granularities=["segment"]
         )
@@ -186,29 +326,32 @@ def transcribe_audio(audio_path):
     return result.segments
 
 
-def translate_text(chinese_text):
+def translate_text(text):
     """
-    Dịch Trung -> Việt.
+    Trung -> Việt.
     """
 
     response = client.responses.create(
+
         model="gpt-5.6-luna",
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    "Bạn là biên dịch viên phụ đề phim Trung Quốc sang tiếng Việt. "
-                    "Hãy dịch trung thành với nguyên nghĩa, tự nhiên trong tiếng Việt, "
-                    "giữ đúng ngữ cảnh hội thoại. "
-                    "Không giải thích. Không thêm nội dung. "
-                    "Không dịch tên riêng nếu tên đó nên được giữ nguyên."
-                )
-            },
-            {
-                "role": "user",
-                "content": chinese_text
-            }
-        ]
+
+        instructions=(
+            "Bạn là biên dịch viên phụ đề phim Trung Quốc "
+            "sang tiếng Việt. "
+
+            "Dịch trung thành với nguyên nghĩa. "
+            "Ưu tiên câu tiếng Việt tự nhiên nhưng không "
+            "tự ý thêm hoặc bớt nội dung. "
+
+            "Giữ đúng sắc thái hội thoại. "
+            "Tên người, địa danh và thuật ngữ riêng "
+            "phải được xử lý nhất quán. "
+
+            "Chỉ trả về bản dịch. "
+            "Không giải thích."
+        ),
+
+        input=text
     )
 
     return response.output_text.strip()
@@ -216,69 +359,111 @@ def translate_text(chinese_text):
 
 def format_time(seconds):
     """
-    Chuyển giây thành định dạng SRT:
-    HH:MM:SS,mmm
+    Giây -> HH:MM:SS,mmm
     """
-
-    milliseconds = int((seconds - int(seconds)) * 1000)
 
     total_seconds = int(seconds)
 
+    milliseconds = int(
+        round(
+            (seconds - total_seconds) * 1000
+        )
+    )
+
+    if milliseconds >= 1000:
+
+        total_seconds += 1
+        milliseconds = 0
+
     hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
+
+    minutes = (
+        total_seconds % 3600
+    ) // 60
+
     secs = total_seconds % 60
 
-    return f"{hours:02}:{minutes:02}:{secs:02},{milliseconds:03}"
+    return (
+        f"{hours:02}:"
+        f"{minutes:02}:"
+        f"{secs:02},"
+        f"{milliseconds:03}"
+    )
 
 
-def create_srt(segments):
+def create_srt(all_segments):
+    """
+    Tạo file SRT.
+    """
 
-    lines = []
+    output = []
 
-    for index, segment in enumerate(segments, start=1):
+    subtitle_number = 1
 
-        chinese = segment.text.strip()
+    for segment in all_segments:
 
-        if not chinese:
+        text = segment["text"].strip()
+
+        if not text:
             continue
 
-        print(
-            f"Dịch câu {index}: {chinese}"
+        start = format_time(
+            segment["start"]
         )
 
-        vietnamese = translate_text(chinese)
+        end = format_time(
+            segment["end"]
+        )
 
-        start = format_time(segment.start)
-        end = format_time(segment.end)
+        print(
+            f"Dịch câu {subtitle_number}: "
+            f"{text}"
+        )
 
-        lines.append(str(index))
-        lines.append(f"{start} --> {end}")
-        lines.append(vietnamese)
-        lines.append("")
+        vietnamese = translate_text(text)
 
-    return "\n".join(lines)
+        output.append(
+            str(subtitle_number)
+        )
+
+        output.append(
+            f"{start} --> {end}"
+        )
+
+        output.append(
+            vietnamese
+        )
+
+        output.append("")
+
+        subtitle_number += 1
+
+    return "\n".join(output)
 
 
 @app.route("/")
 def home():
 
     return render_template_string(
-        HTML,
-        message=None,
-        message_type=""
+        HTML
     )
 
 
-@app.route("/vietsub", methods=["POST"])
+@app.route(
+    "/vietsub",
+    methods=["POST"]
+)
 def vietsub():
 
-    video = request.files.get("video")
+    video = request.files.get(
+        "video"
+    )
 
     if not video:
 
         return render_template_string(
             HTML,
-            message="Chưa chọn video.",
+            message="Bạn chưa chọn video.",
             message_type="error"
         )
 
@@ -290,92 +475,213 @@ def vietsub():
             message_type="error"
         )
 
+    if not api_key:
+
+        return render_template_string(
+            HTML,
+            message=(
+                "Server chưa được cấu hình "
+                "OPENAI_API_KEY."
+            ),
+            message_type="error"
+        )
+
+
     try:
 
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory() as temp:
 
             video_path = os.path.join(
-                temp_dir,
+                temp,
                 "video"
             )
 
             audio_path = os.path.join(
-                temp_dir,
+                temp,
                 "audio.wav"
             )
 
-            srt_path = os.path.join(
-                temp_dir,
-                "vietsub.srt"
+            parts_folder = os.path.join(
+                temp,
+                "parts"
             )
 
-            # Lưu video
-            video.save(video_path)
+            os.makedirs(
+                parts_folder,
+                exist_ok=True
+            )
 
-            # 1. Video -> audio
-            convert_to_audio(
+
+            # ==================================
+            # 1. Lưu video
+            # ==================================
+
+            video.save(
+                video_path
+            )
+
+
+            # ==================================
+            # 2. Video -> WAV
+            # ==================================
+
+            print(
+                "Đang chuyển video thành audio..."
+            )
+
+            convert_video_to_audio(
                 video_path,
                 audio_path
             )
 
-            # 2. Audio -> tiếng Trung + timestamp
-            segments = transcribe_audio(
-                audio_path
+
+            # ==================================
+            # 3. Chia audio
+            # ==================================
+
+            print(
+                "Đang chia audio..."
             )
 
-            if not segments:
+            audio_parts = split_audio(
+                audio_path,
+                parts_folder
+            )
 
-                return render_template_string(
-                    HTML,
-                    message="Không nhận diện được giọng nói.",
-                    message_type="error"
+
+            if not audio_parts:
+
+                raise Exception(
+                    "Không tạo được audio."
                 )
 
-            # 3. Trung -> Việt
-            srt_content = create_srt(
-                segments
+
+            # ==================================
+            # 4. Nhận diện tiếng Trung
+            # ==================================
+
+            all_segments = []
+
+            offset = 0
+
+            for part in audio_parts:
+
+                print(
+                    f"Đang nhận diện: {part}"
+                )
+
+                segments = transcribe_part(
+                    part
+                )
+
+
+                for segment in segments:
+
+                    all_segments.append(
+                        {
+                            "start":
+                                segment.start + offset,
+
+                            "end":
+                                segment.end + offset,
+
+                            "text":
+                                segment.text
+                        }
+                    )
+
+
+                # Mỗi part dài khoảng 600 giây
+                offset += 600
+
+
+            if not all_segments:
+
+                raise Exception(
+                    "Không nhận diện được "
+                    "tiếng nói trong video."
+                )
+
+
+            # ==================================
+            # 5. Trung -> Việt
+            # ==================================
+
+            print(
+                "Bắt đầu dịch Trung -> Việt..."
             )
 
-            # 4. Lưu SRT
-            with open(
-                srt_path,
-                "w",
-                encoding="utf-8"
-            ) as f:
+            srt_content = create_srt(
+                all_segments
+            )
 
-                f.write(srt_content)
 
-            # Đọc vào bộ nhớ trước khi TemporaryDirectory bị xóa
-            srt_data = srt_content.encode("utf-8")
-
-            from io import BytesIO
+            # ==================================
+            # 6. Trả file SRT
+            # ==================================
 
             return send_file(
-                BytesIO(srt_data),
+
+                BytesIO(
+                    srt_content.encode(
+                        "utf-8"
+                    )
+                ),
+
                 as_attachment=True,
-                download_name="vietsub-viet.srt",
-                mimetype="text/plain; charset=utf-8"
+
+                download_name=(
+                    "vietsub-viet.srt"
+                ),
+
+                mimetype=(
+                    "application/x-subrip"
+                )
             )
+
 
     except Exception as e:
 
-        print("ERROR:", e)
+        print(
+            "ERROR:",
+            str(e)
+        )
 
         return render_template_string(
+
             HTML,
-            message=f"Lỗi: {str(e)}",
+
+            message=(
+                "Có lỗi xảy ra: "
+                + str(e)
+            ),
+
             message_type="error"
         )
 
 
 @app.errorhandler(413)
-def too_large(error):
+def file_too_large(error):
 
     return render_template_string(
+
         HTML,
-        message="Video quá lớn. Hiện tại giới hạn là 300 MB.",
+
+        message=(
+            "Video quá lớn. "
+            "Giới hạn hiện tại là 500 MB."
+        ),
+
         message_type="error"
     )
+
+
+@app.route("/health")
+def health():
+
+    return {
+        "status": "ok"
+    }
 
 
 if __name__ == "__main__":
